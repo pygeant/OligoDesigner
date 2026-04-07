@@ -1,0 +1,5 @@
+{
+  "name": "OligoDesigner",
+  "description": "Converts raw Oligo sequence into Mermade-ready sequences",
+  "requestFramePermissions": []
+}
