@@ -1,12 +1,11 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig, loadEnv} from 'vite';
+import {defineConfig} from 'vite';
 import { viteSingleFile } from "vite-plugin-singlefile";
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig(({mode}) => {
-  const env = loadEnv(mode, '.', '');
+export default defineConfig(() => {
   return {
     plugins: [
       react(), 
@@ -55,9 +54,10 @@ export default defineConfig(({mode}) => {
         },
       },
     },
-    define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-    },
+    // The API key is intentionally NOT inlined here: the standalone build is a
+    // shareable single HTML file, and a baked key would travel with it. The
+    // browser either talks to the server proxy or uses a key the user stores
+    // locally (see src/lib/ai.ts).
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
