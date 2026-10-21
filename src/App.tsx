@@ -3,206 +3,73 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { 
-  Zap, 
-  Database, 
-  Layers, 
-  Download, 
-  Copy, 
-  Trash2, 
-  Plus, 
-  Search, 
-  Settings2, 
-  Info, 
-  ChevronRight, 
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Zap,
+  Database,
+  Layers,
+  Download,
+  Copy,
+  Trash2,
+  Plus,
+  Search,
+  Settings2,
+  Info,
   Check,
   Share,
-  Moon,
-  Sun,
   FileText,
   Table,
-  FlaskConical,
   Beaker,
   Dna,
   BookOpen,
   Archive,
   AlertCircle,
-  X
+  GitCompare,
+  X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 
-// --- Utility ---
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { cn } from './lib/cn';
+import { DEFAULT_MODS, PRESET_PATTERNS } from './lib/chemistry';
+import {
+  baseString,
+  buildRawSeq as buildSeq,
+  calculateStats as computeStats,
+  getBaseKey,
+} from './lib/calc';
+import {
+  applyPattern,
+  parseSequence,
+  scanUnrecognized,
+  stripName,
+  type UnknownMapping,
+} from './lib/parser';
+import { drawNecklace } from './lib/render';
+import { batchReportHtml, singleReportHtml } from './lib/report';
+import { assessRisk } from './lib/risk';
+import { getStoredKey, setStoredKey } from './lib/ai';
+import { AiPanel } from './components/AiPanel';
+import { DuplexTab } from './components/DuplexTab';
+import { MsTab } from './components/MsTab';
+import { RiskPanel } from './components/RiskPanel';
+import { BulkAction, FilterChip, StatRow, TabButton } from './components/ui';
+import type {
+  Bead,
+  MassOptions,
+  ModLibrary,
+  ModType,
+  Modification,
+  Oligo,
+} from './lib/types';
 
-// --- Types ---
-type ModType = 'sugar' | 'backbone' | 'terminal5' | 'terminal3' | 'base' | 'other' | 'standard' | 'spacer';
-
-interface Modification {
-  id: string;
-  code: string;
-  name: string;
-  type: ModType;
-  color: string;
-  mw: number;
-  formula?: string;
-  delta?: boolean;
-  notation?: string;
-  epsilon?: number;
-  ref?: string;
-  desc?: string;
-  builtin?: boolean;
-}
-
-interface Bead {
-  base: string;
-  baseType: 'dna' | 'rna';
-  modId: string | null;
-}
-
-interface Bond {
-  typeId: string; // 'PO', 'PS', or custom backbone ID
-}
-
-interface Oligo {
-  name: string;
-  beads: Bead[];
-  bonds: Bond[];
-  term5: string | null;
-  term3: string | null;
-}
-
-// --- Constants & Defaults ---
-const DEFAULT_MODS: Record<string, Modification> = {
-  // DNA standard
-  "dA": { id: "dA", code: "dA", name: "Désoxyadenosine", mw: 251.245, formula: "C10H13N5O3", type: "standard", color: "#10b981", epsilon: 15200, builtin: true },
-  "dT": { id: "dT", code: "dT", name: "Désoxythymidine", mw: 242.231, formula: "C10H14N2O5", type: "standard", color: "#10b981", epsilon: 8400, builtin: true },
-  "dG": { id: "dG", code: "dG", name: "Désoxyguanosine", mw: 267.243, formula: "C10H13N5O4", type: "standard", color: "#10b981", epsilon: 12010, builtin: true },
-  "dC": { id: "dC", code: "dC", name: "Désoxycytidine", mw: 227.219, formula: "C9H13N3O4", type: "standard", color: "#10b981", epsilon: 7050, builtin: true },
-  // RNA standard
-  "rA": { id: "rA", code: "rA", name: "Adénosine", mw: 267.244, formula: "C10H13N5O4", type: "standard", color: "#3b82f6", epsilon: 15400, builtin: true },
-  "rU": { id: "rU", code: "rU", name: "Uridine", mw: 244.201, formula: "C9H12N2O6", type: "standard", color: "#3b82f6", epsilon: 9900, builtin: true },
-  "rG": { id: "rG", code: "rG", name: "Guanosine", mw: 283.243, formula: "C10H13N5O5", type: "standard", color: "#3b82f6", epsilon: 11500, builtin: true },
-  "rC": { id: "rC", code: "rC", name: "Cytidine", mw: 243.219, formula: "C9H13N3O5", type: "standard", color: "#3b82f6", epsilon: 7200, builtin: true },
-  // Sugars
-  "OMe": { id: "OMe", code: "2'OMe", name: "2'-O-Méthyl", type: "sugar", color: "#111111", mw: 14.016, delta: true, notation: "(Nom)", builtin: true, desc: "Résistance aux nucléases." },
-  "F": { id: "F", code: "2'F", name: "2'-Fluoro", type: "sugar", color: "#16a34a", mw: 1.995, delta: true, notation: "(N2f)", builtin: true, desc: "Stabilité thermique." },
-  "LNA": { id: "LNA", code: "LNA", name: "Locked Nucleic Acid", type: "sugar", color: "#7c3aed", mw: 28.01, delta: true, notation: "(Nl)", builtin: true, desc: "Affinité élevée." },
-  // Backbone
-  "PO": { id: "PO", code: "PO", name: "Phosphodiester", type: "backbone", color: "#64748b", mw: 0, delta: true, notation: "", builtin: true },
-  "PS": { id: "PS", code: "PS", name: "Phosphorothioate", type: "backbone", color: "#f97316", mw: 16.06, delta: true, notation: "*", builtin: true, desc: "Résistance nucléase." },
-  // Terminals
-  "5Phos": { id: "5Phos", code: "/5Phos/", name: "Phosphate 5'", type: "terminal5", color: "#f472b6", mw: 79.979, delta: true, notation: "/5Phos/", builtin: true },
-  "3Phos": { id: "3Phos", code: "/3Phos/", name: "Phosphate 3'", type: "terminal3", color: "#34d399", mw: 79.979, delta: true, notation: "/3Phos/", builtin: true },
-  "5Cy3": { id: "5Cy3", code: "/5Cy3/", name: "Cy3 5'", type: "terminal5", color: "#f59e0b", mw: 767.0, delta: true, notation: "/5Cy3/", builtin: true },
-  "3Biotin": { id: "3Biotin", code: "/3BioTEG/", name: "Biotine 3'", type: "terminal3", color: "#f97316", mw: 414.5, delta: true, notation: "/3BioTEG/", builtin: true },
-  "HEG": { id: "HEG", code: "/HEG/", name: "Hexaethylene Glycol", type: "spacer", color: "#a855f7", mw: 344.36, delta: false, notation: "/HEG/", builtin: true, desc: "Internal non-nucleoside spacer." },
-};
-
-const PRESET_PATTERNS = [
-  {
-    id: 'preset_sirna_sense_21b',
-    name: 'siRNA sense 21b',
-    description: '21nt siRNA sense strand pattern.',
-    beads: [
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "F", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "F", baseType: "rna" },
-      { modId: "F", baseType: "rna" }, { modId: "F", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }
-    ],
-    bonds: [
-      { typeId: "PS" }, { typeId: "PS" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }
-    ],
-    term5: null,
-    term3: null
-  },
-  {
-    id: 'preset_sirna_antisense_23b',
-    name: 'siRNA antisense 23b',
-    description: '23nt siRNA antisense strand pattern.',
-    beads: [
-      { modId: "OMe", baseType: "rna" }, { modId: "F", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "F", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "F", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "F", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" },
-      { modId: "OMe", baseType: "rna" }, { modId: "OMe", baseType: "rna" }
-    ],
-    bonds: [
-      { typeId: "PS" }, { typeId: "PS" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" }, { typeId: "PO" },
-      { typeId: "PS" }, { typeId: "PS" }
-    ],
-    term5: null,
-    term3: null
-  },
-  {
-    id: 'preset_sirna',
-    name: 'siRNA (Alternating 2\'OMe/2\'F)',
-    description: '21nt alternating 2\'OMe and 2\'F modifications with PS ends.',
-    beads: Array.from({ length: 21 }, (_, i) => ({ 
-      modId: i % 2 === 0 ? 'OMe' : 'F', 
-      baseType: 'rna' as const
-    })),
-    bonds: Array.from({ length: 20 }, (_, i) => ({ 
-      typeId: (i < 2 || i >= 18) ? 'PS' : 'PO' 
-    })),
-    term5: null,
-    term3: null
-  },
-  {
-    id: 'preset_aso',
-    name: 'ASO Gapmer (5-10-5 LNA/DNA)',
-    description: '20nt Gapmer: 5 LNA ends, 10 DNA gap, fully phosphorothioated.',
-    beads: Array.from({ length: 20 }, (_, i) => ({ 
-      modId: (i < 5 || i >= 15) ? 'LNA' : null, 
-      baseType: (i < 5 || i >= 15) ? 'rna' as const : 'dna' as const
-    })),
-    bonds: Array.from({ length: 19 }, () => ({ 
-      typeId: 'PS' 
-    })),
-    term5: null,
-    term3: null
-  },
-  {
-    id: 'preset_rna_ps',
-    name: 'Fully PS RNA',
-    description: '21nt RNA with full phosphorothioate backbone.',
-    beads: Array.from({ length: 21 }, () => ({ 
-      modId: null, 
-      baseType: 'rna' as const
-    })),
-    bonds: Array.from({ length: 20 }, () => ({ 
-      typeId: 'PS' 
-    })),
-    term5: null,
-    term3: null
-  }
-];
-
-const HPO3 = 79.979;
-const BRIDGE = 61.964;
-const DMT_MW = 303.03;
 
 // --- Main Component ---
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'designer' | 'batch' | 'database'>('designer');
+  const [activeTab, setActiveTab] = useState<'designer' | 'duplex' | 'ms' | 'batch' | 'database'>(
+    'designer',
+  );
   const [mods, setMods] = useState<Record<string, Modification>>(DEFAULT_MODS);
   const [oligo, setOligo] = useState<Oligo>({
     name: 'Untitled_Oligo',
@@ -234,6 +101,7 @@ export default function App() {
   const [unrecognizedMappings, setUnrecognizedMappings] = useState<Record<string, { modId?: string, mass?: number }>>({});
   const [necklaceDirection, setNecklaceDirection] = useState<'5-3' | '3-5'>('5-3');
   const [selectedBatchPatternId, setSelectedBatchPatternId] = useState<string | null>(null);
+  const [aiKey, setAiKey] = useState('');
 
   // Load from LocalStorage
   useEffect(() => {
@@ -254,6 +122,8 @@ export default function App() {
         console.error('Failed to load patterns', e);
       }
     }
+
+    setAiKey(getStoredKey());
   }, []);
 
   // Save to LocalStorage
@@ -268,409 +138,50 @@ export default function App() {
     localStorage.setItem('oligo_designer_patterns', JSON.stringify(patterns));
   }, [patterns]);
 
-  // --- Calculation Logic ---
-  const calculateStats = (oligoData: Oligo) => {
-    if (oligoData.beads.length === 0) return null;
-
-    let mw = 0;
-    let nBases = 0;
-    let gcCount = 0;
-    let epsilon = 0;
-    let psCount = 0;
-
-    // Sum bead masses
-    oligoData.beads.forEach((bead) => {
-      const mod = bead.modId ? mods[bead.modId] : null;
-      
-      if (mod?.type === 'spacer') {
-        mw += mod.mw;
-        // Spacers don't contribute to nBases or GC count
-      } else {
-        const baseKey = getBaseKey(bead.base, bead.baseType);
-        const baseMod = mods[baseKey];
-        if (baseMod) {
-          mw += baseMod.mw;
-          nBases++;
-          if (bead.base === 'G' || bead.base === 'C') gcCount++;
-          epsilon += baseMod.epsilon || 0;
-        }
-
-        if (mod) {
-          mw += mod.mw;
-        }
-      }
-    });
-
-    // Sum bond masses
-    oligoData.bonds.forEach((bond) => {
-      const bondMod = mods[bond.typeId];
-      if (bondMod) {
-        mw += bondMod.mw;
-        if (bond.typeId === 'PS') psCount++;
-      }
-    });
-
-    // Terminals
-    if (oligoData.term5 && mods[oligoData.term5]) mw += mods[oligoData.term5].mw;
-    if (oligoData.term3 && mods[oligoData.term3]) mw += mods[oligoData.term3].mw;
-
-    // Phosphodiester backbone correction
-    if (nBases > 0) {
-      mw += (nBases - 1) * BRIDGE;
-      
-      const has5Phos = oligoData.term5 === '5Phos';
-      if (!has5Phos && end5Mode === 'p') mw += HPO3;
-    }
-
-    const mwDmt = mw + (dmtOn ? DMT_MW : 0);
-    const gcPct = nBases > 0 ? (gcCount / nBases) * 100 : 0;
-    const finalEpsilon = Math.round(epsilon * 0.9);
-
-    // Tm (Wallace / Marmur-Doty)
-    let tm = 0;
-    const atCount = nBases - gcCount;
-    if (nBases <= 20) {
-      tm = gcCount * 4 + atCount * 2;
-    } else {
-      tm = 64.9 + 41 * (gcCount - 16.4) / nBases;
-    }
-
-    return {
-      mw: mw.toFixed(2),
-      mwDmt: mwDmt.toFixed(2),
-      nBases,
-      gcPct: gcPct.toFixed(1),
-      epsilon: finalEpsilon,
-      tm: tm.toFixed(1),
-      psCount
-    };
-  };
-
-  const getBaseKey = (base: string, currentSeries: 'dna' | 'rna') => {
-    if (currentSeries === 'dna') {
-      if (base === 'A') return 'dA';
-      if (base === 'T' || base === 'U') return 'dT';
-      if (base === 'G') return 'dG';
-      if (base === 'C') return 'dC';
-    } else {
-      if (base === 'A') return 'rA';
-      if (base === 'U' || base === 'T') return 'rU';
-      if (base === 'G') return 'rG';
-      if (base === 'C') return 'rC';
-    }
-    return '';
-  };
+  // --- Derived state ---
+  const massOptions: MassOptions = useMemo(() => ({ dmtOn, end5Mode }), [dmtOn, end5Mode]);
+  const calculateStats = (oligoData: Oligo) => computeStats(oligoData, mods, massOptions);
+  const buildRawSeq = (target: Oligo) => buildSeq(target, mods);
 
   const stats = useMemo(() => calculateStats(oligo), [oligo, dmtOn, end5Mode, mods]);
+  const sequence = useMemo(() => baseString(oligo), [oligo]);
+  const risk = useMemo(
+    () => (oligo.beads.length ? assessRisk(oligo, sequence) : null),
+    [oligo, sequence],
+  );
 
   // --- Actions ---
-  const handleGenerate = (inputToProcess?: any, mappings?: Record<string, { modId?: string, mass?: number }>) => {
-    let input = (typeof inputToProcess === 'string' ? inputToProcess : rawInput).trim();
+  const handleGenerate = (
+    inputToProcess?: unknown,
+    mappings?: Record<string, UnknownMapping>,
+  ) => {
+    const input = stripName(typeof inputToProcess === 'string' ? inputToProcess : rawInput);
     if (!input) return;
 
-    // Handle name/tab prefix
-    if (input.includes('\t')) {
-      const parts = input.split('\t');
-      input = parts[parts.length - 1].trim();
-    } else if (input.includes(' ')) {
-      const firstParen = input.indexOf('(');
-      const firstSlash = input.indexOf('/');
-      const start = Math.min(
-        firstParen === -1 ? Infinity : firstParen,
-        firstSlash === -1 ? Infinity : firstSlash
-      );
-      if (start !== Infinity && start > 0) {
-        input = input.slice(start).trim();
-      }
-    }
-
-    // --- Pre-scan for unrecognized parts ---
+    // First pass: let the user map anything the library does not know about.
     if (!mappings) {
-      const foundUnrecognized: string[] = [];
-      let temp = input;
-      
-      while (temp.length > 0) {
-        // Skip known patterns
-        const slashMatch = temp.match(/^\/([^\/]+)\//);
-        if (slashMatch) {
-          const code = `/${slashMatch[1]}/`;
-          const mod = (Object.values(mods) as Modification[]).find(m => (m.type === 'terminal5' || m.type === 'terminal3' || m.type === 'other') && (m.code === code || m.notation === code));
-          if (!mod) foundUnrecognized.push(code);
-          temp = temp.slice(slashMatch[0].length);
-          continue;
-        }
-
-        const parenMatch = temp.match(/^\(([^)]+)\)/);
-        if (parenMatch) {
-          const content = parenMatch[1];
-          // Try to find base and mod
-          let base = '';
-          if (/[ATGCU]/.test(content[content.length - 1].toUpperCase())) {
-            base = content[content.length - 1].toUpperCase();
-          } else if (/[ATGCU]/.test(content[0].toUpperCase())) {
-            base = content[0].toUpperCase();
-          }
-          
-          if (!base) {
-            // It's a full mod in parentheses, check if it's known
-            const mod = (Object.values(mods) as Modification[]).find(m => m.code === `(${content})` || m.notation === `(${content})`);
-            if (!mod) foundUnrecognized.push(`(${content})`);
-          }
-          temp = temp.slice(parenMatch[0].length);
-          continue;
-        }
-
-        const prefixMatch = temp.match(/^([mfl])([atgcu])/i);
-        if (prefixMatch) {
-          temp = temp.slice(2);
-          continue;
-        }
-
-        const baseMatch = temp.match(/^([atgcu])/i);
-        if (baseMatch) {
-          temp = temp.slice(1);
-          continue;
-        }
-
-        if (temp.startsWith('*') || temp.toLowerCase().startsWith('d') || temp.toLowerCase().startsWith('r')) {
-          temp = temp.slice(1);
-          continue;
-        }
-
-        // If we reach here, it's unrecognized
-        const unknownChar = temp[0];
-        if (!foundUnrecognized.includes(unknownChar)) foundUnrecognized.push(unknownChar);
-        temp = temp.slice(1);
-      }
-
-      if (foundUnrecognized.length > 0) {
-        setUnrecognizedParts(foundUnrecognized);
+      const unknown = scanUnrecognized(input, mods);
+      if (unknown.length > 0) {
+        setUnrecognizedParts(unknown);
         setPendingSequence(input);
         setIsUnrecognizedModalOpen(true);
         return;
       }
     }
 
-    // --- Actual Parsing ---
-    const newBeads: Bead[] = [];
-    const newBonds: Bond[] = [];
-    let term5: string | null = null;
-    let term3: string | null = null;
-    const newCustomMods: Record<string, Modification> = {};
+    const parsed = parseSequence(input, mods, mappings);
+    if (parsed.beads.length === 0) return;
 
-    let remaining = input;
-    let currentType: 'dna' | 'rna' = 'rna';
-    let nextBondPS = false;
-
-    while (remaining.length > 0) {
-      // Type switches
-      if (remaining.toLowerCase().startsWith('d')) {
-        currentType = 'dna';
-        remaining = remaining.slice(1);
-        continue;
-      }
-      if (remaining.toLowerCase().startsWith('r')) {
-        currentType = 'rna';
-        remaining = remaining.slice(1);
-        continue;
-      }
-
-      // PS bond
-      if (newBeads.length > 0 && remaining.startsWith('*')) {
-        nextBondPS = true;
-        remaining = remaining.slice(1);
-        continue;
-      }
-
-      // Internal / Terminal Mod Match
-      const slashMatch = remaining.match(/^\/([^\/]+)\//);
-      if (slashMatch) {
-        const code = `/${slashMatch[1]}/`;
-        const mod = (Object.values(mods) as Modification[]).find(m => (m.type === 'terminal5' || m.type === 'spacer' || m.type === 'other') && (m.code === code || m.notation === code));
-        
-        if (mod) {
-          if (mod.type === 'terminal5' && newBeads.length === 0) {
-            term5 = mod.id;
-          } else if (mod.type === 'spacer' || mod.type === 'other') {
-            newBeads.push({ base: 'S', baseType: currentType, modId: mod.id });
-            if (newBeads.length > 1) {
-              newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-              nextBondPS = false;
-            }
-          }
-        } else if (mappings?.[code]) {
-          const mapping = mappings[code];
-          if (mapping.modId) {
-            const mappedMod = mods[mapping.modId];
-            if (mappedMod?.type === 'terminal5' && newBeads.length === 0) {
-              term5 = mapping.modId;
-            } else {
-              newBeads.push({ base: 'X', baseType: currentType, modId: mapping.modId });
-              if (newBeads.length > 1) {
-                newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-                nextBondPS = false;
-              }
-            }
-          } else if (mapping.mass !== undefined) {
-            const tempId = `custom_${code.replace(/[\/\(\)]/g, '')}`;
-            const isProbablyTerminal = newBeads.length === 0;
-            newCustomMods[tempId] = { id: tempId, code, name: `Custom ${code}`, type: isProbablyTerminal ? 'terminal5' : 'spacer', color: '#6366f1', mw: mapping.mass!, builtin: false };
-            if (isProbablyTerminal) term5 = tempId;
-            else {
-              newBeads.push({ base: 'X', baseType: currentType, modId: tempId });
-              if (newBeads.length > 1) {
-                newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-                nextBondPS = false;
-              }
-            }
-          }
-        }
-        remaining = remaining.slice(slashMatch[0].length);
-        continue;
-      }
-
-      // 3' Terminal (if at the end)
-      const term3Match = remaining.match(/^\/([^\/]+)\/$/);
-      if (term3Match) {
-        const code = `/${term3Match[1]}/`;
-        const mod = (Object.values(mods) as Modification[]).find(m => m.type === 'terminal3' && (m.code === code || m.notation === code));
-        if (mod) {
-          term3 = mod.id;
-        } else if (mappings?.[code]) {
-          const mapping = mappings[code];
-          if (mapping.modId) term3 = mapping.modId;
-          else if (mapping.mass !== undefined) {
-            const tempId = `custom_${code.replace(/[\/\(\)]/g, '')}`;
-            newCustomMods[tempId] = { id: tempId, code, name: `Custom ${code}`, type: 'terminal3', color: '#6366f1', mw: mapping.mass!, builtin: false };
-            term3 = tempId;
-          }
-        }
-        remaining = '';
-        break;
-      }
-
-      // Parentheses
-      const parenMatch = remaining.match(/^\(([^)]+)\)/);
-      if (parenMatch) {
-        const content = parenMatch[1];
-        const fullCode = `(${content})`;
-        let base = '';
-        let modId: string | null = null;
-
-        if (/[ATGCU]/.test(content[content.length - 1].toUpperCase())) {
-          base = content[content.length - 1].toUpperCase();
-          const modPart = content.slice(0, -1).toLowerCase();
-          modId = (Object.values(mods) as Modification[]).find(m => {
-            if (m.type !== 'sugar') return false;
-            const code = m.code.toLowerCase();
-            const notation = m.notation?.toLowerCase() || '';
-            return code.includes(modPart) || notation.includes(modPart) || 
-                   (modPart === 'om' && m.id === 'OMe') || 
-                   (modPart === '2f' && m.id === 'F');
-          })?.id || null;
-        } else if (/[ATGCU]/.test(content[0].toUpperCase())) {
-          base = content[0].toUpperCase();
-          const modPart = content.slice(1).toLowerCase();
-          modId = (Object.values(mods) as Modification[]).find(m => {
-            if (m.type !== 'sugar') return false;
-            const code = m.code.toLowerCase();
-            const notation = m.notation?.toLowerCase() || '';
-            return code.includes(modPart) || notation.includes(modPart) || 
-                   (modPart === 'om' && m.id === 'OMe') || 
-                   (modPart === '2f' && m.id === 'F');
-          })?.id || null;
-        }
-
-        if (base) {
-          if (base === 'T' && currentType === 'rna') base = 'U';
-          if (base === 'U' && currentType === 'dna') base = 'T';
-          newBeads.push({ base, baseType: currentType, modId });
-          if (newBeads.length > 1) {
-            newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-            nextBondPS = false;
-          }
-        } else if (mappings?.[fullCode]) {
-          const mapping = mappings[fullCode];
-          const tempId = mapping.modId || `custom_${fullCode.replace(/[\/\(\)]/g, '')}`;
-          if (!mapping.modId && mapping.mass !== undefined) {
-            newCustomMods[tempId] = { id: tempId, code: fullCode, name: `Custom ${fullCode}`, type: 'other', color: '#6366f1', mw: mapping.mass!, builtin: false };
-          }
-          newBeads.push({ base: 'X', baseType: currentType, modId: tempId });
-          if (newBeads.length > 1) {
-            newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-            nextBondPS = false;
-          }
-        }
-        remaining = remaining.slice(parenMatch[0].length);
-        continue;
-      }
-
-      // Prefixes
-      const prefixMatch = remaining.match(/^([mfl])([atgcu])/i);
-      if (prefixMatch) {
-        const prefix = prefixMatch[1].toLowerCase();
-        let base = prefixMatch[2].toUpperCase();
-        let modId: string | null = null;
-        if (prefix === 'm') modId = 'OMe';
-        if (prefix === 'f') modId = 'F';
-        if (prefix === 'l') modId = 'LNA';
-
-        if (base === 'T' && currentType === 'rna') base = 'U';
-        if (base === 'U' && currentType === 'dna') base = 'T';
-        newBeads.push({ base, baseType: currentType, modId });
-        if (newBeads.length > 1) {
-          newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-          nextBondPS = false;
-        }
-        remaining = remaining.slice(2);
-        continue;
-      }
-
-      // Single base
-      const baseMatch = remaining.match(/^([atgcu])/i);
-      if (baseMatch) {
-        let base = baseMatch[1].toUpperCase();
-        if (base === 'T' && currentType === 'rna') base = 'U';
-        if (base === 'U' && currentType === 'dna') base = 'T';
-        newBeads.push({ base, baseType: currentType, modId: null });
-        if (newBeads.length > 1) {
-          newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-          nextBondPS = false;
-        }
-        remaining = remaining.slice(1);
-        continue;
-      }
-
-      // Unrecognized single character
-      const unknownChar = remaining[0];
-      if (mappings?.[unknownChar]) {
-        const mapping = mappings[unknownChar];
-        const tempId = mapping.modId || `custom_${unknownChar.replace(/[\/\(\)]/g, '')}`;
-        if (!mapping.modId && mapping.mass !== undefined) {
-          newCustomMods[tempId] = { id: tempId, code: unknownChar, name: `Custom ${unknownChar}`, type: 'other', color: '#6366f1', mw: mapping.mass!, builtin: false };
-        }
-        newBeads.push({ base: 'X', baseType: currentType, modId: tempId });
-        if (newBeads.length > 1) {
-          newBonds.push({ typeId: nextBondPS ? 'PS' : 'PO' });
-          nextBondPS = false;
-        }
-      }
-
-      remaining = remaining.slice(1);
+    if (Object.keys(parsed.customMods).length > 0) {
+      setMods((prev) => ({ ...prev, ...parsed.customMods }));
     }
 
-    if (newBeads.length === 0) return;
-
-    if (Object.keys(newCustomMods).length > 0) {
-      setMods(prev => ({ ...prev, ...newCustomMods }));
-    }
-
-    setOligo(prev => ({
+    setOligo((prev) => ({
       ...prev,
-      beads: newBeads,
-      bonds: newBonds,
-      term5,
-      term3
+      beads: parsed.beads,
+      bonds: parsed.bonds,
+      term5: parsed.term5,
+      term3: parsed.term3,
     }));
   };
 
@@ -716,96 +227,45 @@ export default function App() {
   };
 
   const runBatch = () => {
-    const lines = batchInput.trim().split('\n').filter(l => l.trim());
-    
-    // Get the pattern to apply
-    let patternToApply: any = oligo;
-    if (selectedBatchPatternId) {
-      const allPatterns = [...PRESET_PATTERNS, ...patterns];
-      const found = allPatterns.find(p => p.id === selectedBatchPatternId);
-      if (found) patternToApply = found;
-    }
+    const lines = batchInput.trim().split('\n').filter((l) => l.trim());
+    const allPatterns = [...PRESET_PATTERNS, ...patterns];
+    const pattern = selectedBatchPatternId
+      ? allPatterns.find((p) => p.id === selectedBatchPatternId) ?? oligo
+      : oligo;
 
-    const results = lines.map((line, i) => {
-      const parts = line.split('\t');
-      const name = parts.length > 1 ? parts[0] : `Oligo_${i + 1}`;
-      const seq = (parts.length > 1 ? parts[1] : parts[0]).toUpperCase().replace(/[^ATGCU]/g, '');
-      
-      // Apply chosen pattern to this sequence
-      const bases = seq.split('');
-      const beadsA: Bead[] = bases.map((base, idx) => {
-        const templateBead = idx < patternToApply.beads.length ? patternToApply.beads[idx] : null;
-        const baseType = templateBead ? templateBead.baseType : (patternToApply.series || 'rna');
-        let normalizedBase = base;
-        if (normalizedBase === 'T' && baseType === 'rna') normalizedBase = 'U';
-        if (normalizedBase === 'U' && baseType === 'dna') normalizedBase = 'T';
-        
+    setBatchResults(
+      lines.map((line, i) => {
+        const parts = line.split('\t');
+        const name = parts.length > 1 ? parts[0] : `Oligo_${i + 1}`;
+        const batchOligo = applyPattern(name, parts.length > 1 ? parts[1] : parts[0], pattern);
         return {
-          base: normalizedBase,
-          baseType,
-          modId: templateBead ? templateBead.modId : null
+          ...batchOligo,
+          stats: calculateStats(batchOligo),
+          risk: assessRisk(batchOligo, baseString(batchOligo)),
+          rawSeq: buildRawSeq(batchOligo),
         };
-      });
-      const bondsA: Bond[] = Array.from({ length: Math.max(0, bases.length - 1) }, (_, idx) => ({
-        typeId: idx < patternToApply.bonds.length ? patternToApply.bonds[idx].typeId : 'PO'
-      }));
-
-      const batchOligo: Oligo = {
-        name,
-        beads: beadsA,
-        bonds: bondsA,
-        term5: patternToApply.term5,
-        term3: patternToApply.term3
-      };
-
-      return {
-        ...batchOligo,
-        stats: calculateStats(batchOligo),
-        rawSeq: buildRawSeq(batchOligo)
-      };
-    });
-    setBatchResults(results);
+      }),
+    );
   };
 
-  const buildRawSeq = (o: Oligo) => {
-    let res = '';
-    if (o.term5 && mods[o.term5]) res += mods[o.term5].notation || mods[o.term5].code;
-    
-    o.beads.forEach((bead, i) => {
-      const mod = bead.modId ? mods[bead.modId] : null;
-      if (mod && mod.notation) {
-        res += mod.notation.replace('N', bead.base);
-      } else if (mod) {
-        res += `(${bead.base}${mod.code})`;
-      } else {
-        res += bead.base;
-      }
-
-      if (i < o.bonds.length) {
-        const bond = mods[o.bonds[i].typeId];
-        if (bond && bond.notation) res += bond.notation;
-      }
-    });
-
-    if (o.term3 && mods[o.term3]) res += mods[o.term3].notation || mods[o.term3].code;
-    return res;
-  };
 
   const exportBatchCSV = () => {
     if (!batchResults.length) return;
-    const data = batchResults.map(r => ({
+    const data = batchResults.map((r) => ({
       Nom: r.name,
       Séquence: r.rawSeq,
       Longueur: r.stats?.nBases,
       'MW (g/mol)': r.stats?.mw,
       'GC%': r.stats?.gcPct,
       'Epsilon 260': r.stats?.epsilon,
-      'Tm (°C)': r.stats?.tm
+      'Liaisons PS': r.stats?.psCount,
+      'Risque synthèse': r.risk?.score,
+      'Bande de risque': r.risk?.band,
     }));
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Results");
-    XLSX.writeFile(workbook, "oligo_batch_results.xlsx");
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Results');
+    XLSX.writeFile(workbook, 'oligo_batch_results.xlsx');
   };
 
   const exportBatchSEQZip = async () => {
@@ -824,105 +284,11 @@ export default function App() {
     link.click();
   };
 
-  const drawNecklaceOnCtx = (ctx: CanvasRenderingContext2D, o: Oligo, scale: number = 2) => {
-    const R = 28 * scale;
-    const gap = 8 * scale;
-    const barW = 5 * scale;
-    const barH = 24 * scale;
-    const beadSize = R * 2;
-    const slotW = beadSize + gap;
-    const endW = 54 * scale;
-    
-    const totalW = endW + o.beads.length * slotW + endW + 40 * scale;
-    const titleH = o.name ? 30 * scale : 0;
-    const totalH = titleH + 110 * scale;
-    
-    ctx.canvas.width = totalW;
-    ctx.canvas.height = totalH;
-    
-    // Background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, totalW, totalH);
-    
-    // Title
-    if (o.name) {
-      ctx.font = `bold italic ${14 * scale}px sans-serif`;
-      ctx.fillStyle = '#18181b';
-      ctx.textAlign = 'center';
-      ctx.fillText(o.name, totalW / 2, 20 * scale);
-    }
-    
-    const top = titleH + 50 * scale;
-    let x = 20 * scale + endW;
-    
-    const isReversed = necklaceDirection === '3-5';
-    
-    // Left End
-    ctx.font = `bold ${11 * scale}px monospace`;
-    const leftTerm = isReversed ? o.term3 : o.term5;
-    ctx.fillStyle = leftTerm ? (isReversed ? '#10b981' : '#f472b6') : '#64748b';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const leftLabel = leftTerm ? mods[leftTerm].code.replace(/\//g, '') : (isReversed ? "3'" : "5'");
-    ctx.fillText(leftLabel, 20 * scale + endW / 2, top);
-    
-    const beadsToDraw = isReversed ? [...o.beads].reverse() : o.beads;
-    const bondsToDraw = isReversed ? [...o.bonds].reverse() : o.bonds;
-    
-    beadsToDraw.forEach((bead, i) => {
-      // Bond
-      if (i > 0) {
-        const bondMod = mods[bondsToDraw[i - 1].typeId];
-        if (bondMod && bondMod.id !== 'PO') {
-          ctx.fillStyle = bondMod.color || '#64748b';
-          ctx.beginPath();
-          const bx = x - gap / 2 - barW / 2;
-          const by = top - barH / 2;
-          ctx.roundRect ? ctx.roundRect(bx, by, barW, barH, 3 * scale) : ctx.rect(bx, by, barW, barH);
-          ctx.fill();
-        }
-      }
-      
-      // Bead
-      const baseKey = getBaseKey(bead.base, bead.baseType);
-      const baseMod = mods[baseKey];
-      const mod = bead.modId ? mods[bead.modId] : null;
-      const color = mod?.color || baseMod?.color || '#64748b';
-      
-      ctx.beginPath();
-      ctx.arc(x + R, top, R, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = `${color}88`;
-      ctx.lineWidth = 2 * scale;
-      ctx.stroke();
-      
-      // Base Letter
-      ctx.font = `bold ${18 * scale}px monospace`;
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(bead.base, x + R, top);
-      
-      // Position
-      ctx.font = `${9 * scale}px monospace`;
-      ctx.fillStyle = '#71717a';
-      ctx.textBaseline = 'top';
-      const pos = isReversed ? o.beads.length - i : i + 1;
-      ctx.fillText(pos.toString(), x + R, top + R + 8 * scale);
-      
-      x += slotW;
-    });
-    
-    // Right End
-    ctx.font = `bold ${11 * scale}px monospace`;
-    const rightTerm = isReversed ? o.term5 : o.term3;
-    ctx.fillStyle = rightTerm ? (isReversed ? '#f472b6' : '#10b981') : '#64748b';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const rightLabel = rightTerm ? mods[rightTerm].code.replace(/\//g, '') : (isReversed ? "5'" : "3'");
-    ctx.fillText(rightLabel, x + endW / 2, top);
-  };
+  const drawNecklaceOnCtx = (
+    ctx: CanvasRenderingContext2D,
+    target: Oligo,
+    scale: number = 2,
+  ) => drawNecklace(ctx, target, mods, { direction: necklaceDirection, scale });
 
   const exportSinglePNG = () => {
     const canvas = document.createElement('canvas');
@@ -940,95 +306,19 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     drawNecklaceOnCtx(ctx, oligo);
-    const pngData = canvas.toDataURL('image/png');
-    
-    const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Oligo Design Report - ${oligo.name}</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 40px; background: #f9f9f9; }
-        .card { background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); padding: 30px; margin-bottom: 30px; }
-        h1 { margin-top: 0; color: #111; font-size: 24px; border-bottom: 2px solid #eee; padding-bottom: 15px; }
-        h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 20px; font-weight: bold; }
-        .necklace-img { width: 100%; height: auto; border: 1px solid #eee; border-radius: 8px; margin-bottom: 20px; background: #18181b; padding: 20px; box-sizing: border-box; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
-        .stat-item { background: #fcfcfc; border: 1px solid #eee; padding: 15px; border-radius: 8px; }
-        .stat-label { font-size: 10px; text-transform: uppercase; color: #888; margin-bottom: 5px; font-weight: bold; }
-        .stat-value { font-size: 18px; font-weight: 600; color: #2563eb; }
-        .sequence-box { background: #111; color: #eee; padding: 20px; border-radius: 8px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 14px; word-break: break-all; margin-top: 20px; }
-        .footer { text-align: center; font-size: 11px; color: #999; margin-top: 40px; text-transform: uppercase; letter-spacing: 1px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; }
-        th { font-size: 11px; text-transform: uppercase; color: #666; background: #f8f8f8; }
-        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>Oligo Design: ${oligo.name}</h1>
-        <p style="color: #666; font-size: 13px;">Generated on ${new Date().toLocaleString()}</p>
-        
-        <div style="margin-bottom: 20px; display: flex; gap: 40px;">
-            <div><span style="font-size: 10px; text-transform: uppercase; color: #888; font-weight: bold;">5' End:</span> <span style="font-size: 13px; font-weight: 600;">${oligo.term5 ? mods[oligo.term5].name : 'OH'}</span></div>
-            <div><span style="font-size: 10px; text-transform: uppercase; color: #888; font-weight: bold;">3' End:</span> <span style="font-size: 13px; font-weight: 600;">${oligo.term3 ? mods[oligo.term3].name : 'OH'}</span></div>
-        </div>
 
-        <h2>Visual Representation</h2>
-        <img src="${pngData}" class="necklace-img" alt="Oligo Necklace">
-        
-        <h2>Calculated Properties</h2>
-        <div class="stats-grid">
-            <div class="stat-item"><div class="stat-label">Molecular Weight</div><div class="stat-value">${stats?.mw || '—'} g/mol</div></div>
-            <div class="stat-item"><div class="stat-label">MW (DMT-on)</div><div class="stat-value">${stats?.mwDmt || '—'} g/mol</div></div>
-            <div class="stat-item"><div class="stat-label">Length</div><div class="stat-value">${stats?.nBases || '—'} nt</div></div>
-            <div class="stat-item"><div class="stat-label">GC Content</div><div class="stat-value">${stats?.gcPct || '—'}%</div></div>
-            <div class="stat-item"><div class="stat-label">Epsilon 260</div><div class="stat-value">${stats?.epsilon?.toLocaleString() || '—'}</div></div>
-            <div class="stat-item"><div class="stat-label">PS Linkages</div><div class="stat-value">${stats?.psCount || '0'}</div></div>
-        </div>
+    const html = singleReportHtml({
+      oligo,
+      mods,
+      stats,
+      risk,
+      notation: buildRawSeq(oligo),
+      png: canvas.toDataURL('image/png'),
+    });
 
-        <h2>Synthesizer Sequence</h2>
-        <div class="sequence-box">${buildRawSeq(oligo)}</div>
-    </div>
-
-    <div class="card">
-        <h2>Detailed Composition</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Pos</th>
-                    <th>Base</th>
-                    <th>Modification</th>
-                    <th>Linkage (Next)</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${oligo.beads.map((bead, i) => `
-                    <tr>
-                        <td>${i + 1}</td>
-                        <td><strong>${bead.base}</strong></td>
-                        <td>${bead.modId ? mods[bead.modId].name : 'Classic'}</td>
-                        <td>${i < oligo.bonds.length ? oligo.bonds[i].typeId : '—'}</td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table>
-    </div>
-
-    <div class="footer">
-        Generated by OligoDesigner Pro &bull; Unified Design & Calculation
-    </div>
-</body>
-</html>
-    `;
-
-    const blob = new Blob([html], { type: 'text/html' });
     const link = document.createElement('a');
     link.download = `${oligo.name || 'necklace'}_report.html`;
-    link.href = URL.createObjectURL(blob);
+    link.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
     link.click();
   };
 
@@ -1066,71 +356,10 @@ export default function App() {
 
   const exportBatchHTMLReport = () => {
     if (!batchResults.length) return;
-    
-    const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Oligo Batch Design Report</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto; padding: 40px; background: #f9f9f9; }
-        .card { background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); padding: 30px; margin-bottom: 30px; }
-        h1 { margin-top: 0; color: #111; font-size: 24px; border-bottom: 2px solid #eee; padding-bottom: 15px; }
-        h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 20px; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; }
-        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; }
-        th { font-size: 11px; text-transform: uppercase; color: #666; background: #f8f8f8; position: sticky; top: 0; }
-        .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; word-break: break-all; }
-        .footer { text-align: center; font-size: 11px; color: #999; margin-top: 40px; text-transform: uppercase; letter-spacing: 1px; }
-        .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; color: white; background: #2563eb; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>Oligo Batch Design Report</h1>
-        <p style="color: #666; font-size: 13px;">Generated on ${new Date().toLocaleString()} &bull; ${batchResults.length} sequences</p>
-        
-        <table>
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Sequence</th>
-                    <th>MW (g/mol)</th>
-                    <th>Len</th>
-                    <th>GC%</th>
-                    <th>Epsilon</th>
-                    <th>PS</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${batchResults.map(r => `
-                    <tr>
-                        <td><strong>${r.name}</strong></td>
-                        <td class="mono">${r.rawSeq}</td>
-                        <td>${r.stats.mw}</td>
-                        <td>${r.stats.nBases}</td>
-                        <td>${r.stats.gcPct}%</td>
-                        <td>${r.stats.epsilon.toLocaleString()}</td>
-                        <td>${r.stats.psCount}</td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table>
-    </div>
-
-    <div class="footer">
-        Generated by OligoDesigner Pro &bull; Unified Design & Calculation
-    </div>
-</body>
-</html>
-    `;
-
-    const blob = new Blob([html], { type: 'text/html' });
+    const html = batchReportHtml(batchResults);
     const link = document.createElement('a');
-    link.download = `batch_report_${new Date().getTime()}.html`;
-    link.href = URL.createObjectURL(blob);
+    link.download = `batch_report_${Date.now()}.html`;
+    link.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
     link.click();
   };
 
@@ -1305,6 +534,8 @@ export default function App() {
 
           <nav className="flex items-center bg-zinc-900/50 p-1 rounded-lg border border-zinc-800">
             <TabButton active={activeTab === 'designer'} onClick={() => setActiveTab('designer')} icon={<Layers size={16} />} label="Designer" />
+            <TabButton active={activeTab === 'duplex'} onClick={() => setActiveTab('duplex')} icon={<GitCompare size={16} />} label="Duplex" />
+            <TabButton active={activeTab === 'ms'} onClick={() => setActiveTab('ms')} icon={<Beaker size={16} />} label="LC-MS" />
             <TabButton active={activeTab === 'batch'} onClick={() => setActiveTab('batch')} icon={<Table size={16} />} label="Batch" />
             <TabButton active={activeTab === 'database'} onClick={() => setActiveTab('database')} icon={<Database size={16} />} label="Database" />
           </nav>
@@ -1340,6 +571,24 @@ export default function App() {
             >
               {/* Left Column: Input & Controls */}
               <div className="lg:col-span-8 space-y-6">
+                <AiPanel
+                  oligo={oligo}
+                  mods={mods}
+                  currentBases={sequence}
+                  notation={buildRawSeq(oligo)}
+                  facts={[
+                    `Longueur : ${stats?.nBases ?? 0} nt`,
+                    `MW : ${stats?.mw ?? '—'} g/mol`,
+                    `GC : ${stats?.gcPct ?? '—'} %`,
+                    `Liaisons PS : ${stats?.psCount ?? 0}`,
+                    `Score de risque de synthèse : ${risk?.score ?? '—'} (${risk?.band ?? '—'})`,
+                  ].join('\n')}
+                  onApply={(next) => {
+                    setOligo(next);
+                    setRawInput(buildRawSeq(next));
+                  }}
+                />
+
                 {/* Input Card */}
                 <section className="bg-zinc-900/30 border border-zinc-900 rounded-2xl p-6 backdrop-blur-sm">
                   <div className="flex items-center justify-between mb-4">
@@ -1570,7 +819,7 @@ export default function App() {
               {/* Right Column: Stats & Meta */}
               <div className="lg:col-span-4 space-y-6">
                 {/* Stats Card */}
-                <section className="bg-zinc-900/30 border border-zinc-900 rounded-2xl p-6 backdrop-blur-sm sticky top-24">
+                <section className="bg-zinc-900/30 border border-zinc-900 rounded-2xl p-6 backdrop-blur-sm">
                   <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-500 mb-6 flex items-center gap-2">
                     <Beaker size={14} className="text-blue-500" />
                     Calculation Results
@@ -1583,7 +832,6 @@ export default function App() {
                     <StatRow label="Length" value={stats?.nBases || '—'} unit="nt" />
                     <StatRow label="GC Content" value={stats?.gcPct ? `${stats.gcPct}%` : '—'} />
                     <StatRow label="Epsilon 260" value={stats?.epsilon?.toLocaleString() || '—'} unit="M⁻¹cm⁻¹" />
-                    <StatRow label="Tm (Wallace)" value={stats?.tm ? `${stats.tm}°C` : '—'} />
                     <StatRow label="PS Linkages" value={stats?.psCount || '0'} />
                   </div>
 
@@ -1618,13 +866,38 @@ export default function App() {
                     <div className="flex gap-3">
                       <Info size={16} className="text-blue-400 shrink-0 mt-0.5" />
                       <p className="text-[10px] text-zinc-500 leading-relaxed">
-                        Calculations use 0.9 hyperchromicity correction for Epsilon. 
-                        MW includes backbone corrections based on 5' end state.
+                        ε 260 : somme des coefficients monomériques corrigée d'un facteur
+                        d'hypochromicité forfaitaire de 0,9 — approximation indépendante de la
+                        séquence. La MW tient compte du squelette et de l'état de l'extrémité 5'.
                       </p>
                     </div>
                   </div>
                 </section>
+
+                <RiskPanel report={risk} />
               </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'duplex' && (
+            <motion.div
+              key="duplex"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+            >
+              <DuplexTab sense={oligo} mods={mods} massOptions={massOptions} />
+            </motion.div>
+          )}
+
+          {activeTab === 'ms' && (
+            <motion.div
+              key="ms"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+            >
+              <MsTab oligo={oligo} mods={mods} massOptions={massOptions} stats={stats} />
             </motion.div>
           )}
 
@@ -1785,7 +1058,7 @@ export default function App() {
                           <th className="py-4 px-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-right">MW (off)</th>
                           <th className="py-4 px-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-right">GC%</th>
                           <th className="py-4 px-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-right">ε 260</th>
-                          <th className="py-4 px-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-right">Tm</th>
+                          <th className="py-4 px-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-right">Risque</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1797,7 +1070,19 @@ export default function App() {
                             <td className="py-4 px-4 text-xs text-right font-bold text-blue-400">{res.stats?.mw}</td>
                             <td className="py-4 px-4 text-xs text-right text-zinc-400">{res.stats?.gcPct}%</td>
                             <td className="py-4 px-4 text-xs text-right text-zinc-400">{res.stats?.epsilon?.toLocaleString()}</td>
-                            <td className="py-4 px-4 text-xs text-right text-zinc-400">{res.stats?.tm}°C</td>
+                            <td
+                              className={cn(
+                                'py-4 px-4 text-xs text-right font-bold',
+                                res.risk?.score >= 45
+                                  ? 'text-red-400'
+                                  : res.risk?.score >= 20
+                                    ? 'text-amber-400'
+                                    : 'text-emerald-400',
+                              )}
+                              title={res.risk?.band}
+                            >
+                              {res.risk?.score ?? '—'}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1876,23 +1161,27 @@ export default function App() {
                       <Settings2 size={16} className="text-indigo-400" />
                     </div>
                     <div>
-                      <h3 className="text-xs font-bold text-indigo-400 mb-1">Gemini API Configuration</h3>
-                      <p className="text-[10px] text-zinc-500">Required for AI-powered sequence analysis in standalone mode.</p>
+                      <h3 className="text-xs font-bold text-indigo-400 mb-1">Clé API — mode standalone</h3>
+                      <p className="text-[10px] text-zinc-500">
+                        Inutile lorsque l'application est servie par son serveur : la clé reste alors
+                        côté serveur. En fichier HTML autonome, la clé saisie ici est conservée dans
+                        ce navigateur et les séquences analysées sont envoyées au fournisseur.
+                      </p>
                     </div>
                   </div>
                   <div className="flex gap-3">
-                    <input 
-                      type="password" 
-                      placeholder="Enter your Gemini API Key..."
+                    <input
+                      type="password"
+                      placeholder="Clé API…"
                       className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
-                      value={localStorage.getItem('gemini_api_key') || ''}
+                      value={aiKey}
                       onChange={(e) => {
-                        localStorage.setItem('gemini_api_key', e.target.value);
-                        // Force a re-render if needed, but for now just saving it is enough
+                        setAiKey(e.target.value);
+                        setStoredKey(e.target.value.trim());
                       }}
                     />
                     <div className="flex items-center px-3 bg-zinc-950 border border-zinc-800 rounded-xl text-[10px] text-zinc-500 font-mono">
-                      Stored Locally
+                      {aiKey ? 'Stockée localement' : 'Aucune clé'}
                     </div>
                   </div>
                 </div>
@@ -2574,60 +1863,5 @@ export default function App() {
         </div>
       )}
     </div>
-  );
-}
-
-// --- Sub-components ---
-
-function TabButton({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-2 px-4 py-2 rounded-md text-xs font-bold transition-all",
-        active ? "bg-zinc-800 text-blue-400 shadow-sm" : "text-zinc-500 hover:text-zinc-300"
-      )}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function StatRow({ label, value, unit, color }: { label: string, value: string | number, unit?: string, color?: string }) {
-  return (
-    <div className="flex items-center justify-between group">
-      <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest group-hover:text-zinc-400 transition-colors">{label}</span>
-      <div className="flex items-baseline gap-1">
-        <span className={cn("text-lg font-mono font-bold tracking-tighter", color || "text-zinc-200")}>{value}</span>
-        {unit && <span className="text-[10px] font-mono text-zinc-600">{unit}</span>}
-      </div>
-    </div>
-  );
-}
-
-function BulkAction({ onClick, label, color }: { onClick: () => void, label: string, color: string }) {
-  return (
-    <button 
-      onClick={onClick}
-      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition-all active:scale-95"
-    >
-      <div className={cn("w-2 h-2 rounded-full", color)} />
-      <span className="text-[10px] font-bold text-zinc-400">{label}</span>
-    </button>
-  );
-}
-
-function FilterChip({ active, onClick, label }: { active: boolean, onClick: () => void, label: string }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={cn(
-        "px-4 py-1.5 rounded-full text-[10px] font-bold transition-all border whitespace-nowrap",
-        active ? "bg-blue-600 border-blue-500 text-white" : "bg-zinc-900 border-zinc-800 text-zinc-500 hover:border-zinc-700"
-      )}
-    >
-      {label}
-    </button>
   );
 }

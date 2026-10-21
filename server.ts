@@ -3,6 +3,9 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import cookieParser from "cookie-parser";
+import { GoogleGenAI } from "@google/genai";
+
+const AI_MODEL = "gemini-2.5-flash";
 
 async function startServer() {
   const app = express();
@@ -10,6 +13,7 @@ async function startServer() {
 
   app.use(cookieParser());
   app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: "256kb" }));
 
   const APP_PASSWORD = process.env.APP_PASSWORD;
 
@@ -100,6 +104,55 @@ async function startServer() {
           window.location.href = "/";
         </script>
       `);
+    }
+  });
+
+  // --- AI proxy ------------------------------------------------------------
+  // The API key stays on the server: it is never sent to the browser and never
+  // baked into the standalone build.
+  const aiKey = process.env.GEMINI_API_KEY;
+  const genai = aiKey ? new GoogleGenAI({ apiKey: aiKey }) : null;
+
+  app.get("/api/ai/health", (_req, res) => {
+    res.json({ configured: Boolean(genai), model: AI_MODEL });
+  });
+
+  // Coarse in-memory throttle: enough to stop a runaway client loop.
+  const callTimes: number[] = [];
+  const RATE_WINDOW_MS = 60_000;
+  const RATE_LIMIT = 30;
+
+  app.post("/api/ai/generate", async (req, res) => {
+    if (!genai) {
+      return res.status(503).json({ error: "GEMINI_API_KEY non configurée côté serveur." });
+    }
+
+    const now = Date.now();
+    while (callTimes.length && now - callTimes[0] > RATE_WINDOW_MS) callTimes.shift();
+    if (callTimes.length >= RATE_LIMIT) {
+      return res.status(429).json({ error: "Trop de requêtes, réessayez dans une minute." });
+    }
+    callTimes.push(now);
+
+    const { prompt, system, schema } = req.body ?? {};
+    if (typeof prompt !== "string" || !prompt.trim()) {
+      return res.status(400).json({ error: "prompt manquant." });
+    }
+
+    try {
+      const response = await genai.models.generateContent({
+        model: AI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction: typeof system === "string" ? system : undefined,
+          responseMimeType: "application/json",
+          responseSchema: schema,
+        },
+      });
+      res.json({ text: response.text });
+    } catch (error) {
+      console.error("AI proxy error", error);
+      res.status(502).json({ error: "Échec de l'appel au modèle." });
     }
   });
 
